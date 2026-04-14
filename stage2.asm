@@ -6,7 +6,7 @@ extern setup_paging
 
 FS_LOAD_SEGMENT equ 0x5000
 FS_LOAD_OFFSET  equ 0x0000
-FS_LBA_START    equ 64
+FS_LBA_START    equ 128
 FS_SECTORS      equ 64
 
 stage2_start:
@@ -122,3 +122,4 @@ gdt_end:
 gdt_descriptor:
     dw gdt_end - gdt_start - 1
     dq gdt_start
+

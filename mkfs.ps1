@@ -66,12 +66,15 @@ function Add-Entry([string]$name, [byte]$type, [byte]$parent, [string]$text) {
 
 $systemDir = Add-Entry -name 'system' -type 2 -parent 255 -text ''
 $modulesDir = Add-Entry -name 'modules' -type 2 -parent $systemDir -text ''
+$appdbDir = Add-Entry -name 'appdb' -type 2 -parent $systemDir -text ''
 $appsDir = Add-Entry -name 'apps' -type 2 -parent $systemDir -text ''
 
 Add-Entry -name 'readme.txt' -type 1 -parent 255 -text "Welcome to NoxisFS.`nUse help to see shell commands.`n" | Out-Null
 Add-Entry -name 'notes.txt' -type 1 -parent 255 -text "This is a writable custom filesystem.`nTry: write notes.txt hello`n" | Out-Null
 Add-Entry -name 'hello.mod' -type 1 -parent $modulesDir -text "command=hello`nmessage=Hello from /system/modules module!`n" | Out-Null
-Add-Entry -name 'hello.nxapp' -type 1 -parent $appsDir -text "NXAPP-1`nname=Hello App`nversion=0.1`n---`necho Running hello.nxapp`nhello`necho passed args: `$ARGS`n" | Out-Null
+Add-Entry -name 'installed.db' -type 1 -parent $appdbDir -text "" | Out-Null
+Add-Entry -name 'hello.nxapp' -type 1 -parent $appsDir -text "NXAPP-1`nid=hello`nname=Hello App`nversion=1.0`nentry=main`ndescription=Demo app with module call and args output`n---`necho [hello] launch`nhello`necho [hello] args: `$ARGS`n" | Out-Null
+Add-Entry -name 'about.nxapp' -type 1 -parent $appsDir -text "NXAPP-1`nid=about`nname=About Noxis`nversion=1.0`nentry=main`ndescription=Show system version`n---`necho Noxis Application Runtime`nver`n" | Out-Null
 
 Write-U32 $buf 20 $entryIndex
 Write-U32 $buf 24 $usedBytes

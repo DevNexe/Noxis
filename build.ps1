@@ -10,8 +10,8 @@ x86_64-elf-objcopy -O binary stage2.elf stage2.bin
 .\mkfs.ps1
 
 $stage2Sectors = [math]::Ceiling(([System.IO.FileInfo]::new('stage2.bin').Length) / 512)
-if ($stage2Sectors -gt 64) {
-    throw "stage2.bin is too large ($stage2Sectors sectors), boot loader reads 64 sectors"
+if ($stage2Sectors -gt 96) {
+    throw "stage2.bin is too large ($stage2Sectors sectors), boot loader reads 96 sectors"
 }
 
 $imgSize = 512 * 2880
@@ -23,8 +23,8 @@ $imgSize = 512 * 2880
 [Array]::Copy($boot, 0, $img, 0, [Math]::Min($boot.Length, 512))
 [Array]::Copy($stage2, 0, $img, 512, [Math]::Min($stage2.Length, $imgSize - 512))
 
-$fsOffset = 64 * 512
+$fsOffset = 128 * 512
 [Array]::Copy($fs, 0, $img, $fsOffset, [Math]::Min($fs.Length, $imgSize - $fsOffset))
 
 [System.IO.File]::WriteAllBytes('os.img', $img)
-Write-Host "Built os.img (stage2 sectors=$stage2Sectors, fs at LBA 64)"
+Write-Host "Built os.img (stage2 sectors=$stage2Sectors, fs at LBA 128)"

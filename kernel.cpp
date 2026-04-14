@@ -13,11 +13,12 @@ constexpr int HISTORY_SIZE = 16;
 constexpr int MAX_EXEC_DEPTH = 4;
 
 constexpr u64 FS_BASE = 0x50000ULL;
-constexpr u32 FS_LBA_START = 64;
+constexpr u32 FS_LBA_START = 128;
 constexpr u32 FS_SECTORS = 64;
 constexpr u32 FS_BYTES = FS_SECTORS * 512;
 constexpr u32 FS_MAX_ENTRIES = 32;
 constexpr int MAX_MODULES = 16;
+constexpr int MAX_APPS = 24;
 constexpr u8 NXFS_TYPE_FILE = 1;
 constexpr u8 NXFS_TYPE_DIR = 2;
 constexpr u8 NXFS_ROOT_PARENT = 0xFF;
@@ -49,6 +50,19 @@ struct ShellModule {
 ShellModule g_modules[MAX_MODULES];
 int g_module_count = 0;
 int g_exec_depth = 0;
+
+struct AppRecord {
+    bool used;
+    char id[24];
+    char name[48];
+    char version[16];
+    char path[96];
+    char entry[24];
+    char description[80];
+};
+
+AppRecord g_apps[MAX_APPS];
+int g_app_count = 0;
 
 char g_history[HISTORY_SIZE][MAX_LINE];
 int g_history_count = 0;
@@ -170,6 +184,17 @@ bool str_starts_with(const char* a, const char* b) {
     while (b[i] != '\0') {
         if (a[i] != b[i]) return false;
         i++;
+    }
+    return true;
+}
+
+bool str_ends_with(const char* s, const char* suffix) {
+    int ls = str_len(s);
+    int lf = str_len(suffix);
+    if (lf > ls) return false;
+    int off = ls - lf;
+    for (int i = 0; i < lf; i++) {
+        if (s[off + i] != suffix[i]) return false;
     }
     return true;
 }
@@ -1323,11 +1348,25 @@ void nxapp_expand_args(const char* in, const char* args, char* out, int cap) {
     out[o] = '\0';
 }
 
-bool nxapp_parse_manifest(const char* content, int* code_start, char* name, int name_cap, char* version, int ver_cap) {
+bool nxapp_parse_manifest_full(const char* content,
+                               int* code_start,
+                               char* app_id,
+                               int app_id_cap,
+                               char* name,
+                               int name_cap,
+                               char* version,
+                               int ver_cap,
+                               char* entry,
+                               int entry_cap,
+                               char* description,
+                               int desc_cap) {
     int pos = 0;
     char line[180];
+    app_id[0] = '\0';
     name[0] = '\0';
     version[0] = '\0';
+    description[0] = '\0';
+    str_copy(entry, "main", entry_cap);
 
     if (!nxapp_next_line(content, &pos, line, sizeof(line))) return false;
     nxapp_trim(line);
@@ -1345,8 +1384,11 @@ bool nxapp_parse_manifest(const char* content, int* code_start, char* name, int 
         modules_parse_line(line, key, sizeof(key), val, sizeof(val));
         nxapp_trim(key);
         nxapp_trim(val);
+        if (str_ieq(key, "id")) str_copy(app_id, val, app_id_cap);
         if (str_ieq(key, "name")) str_copy(name, val, name_cap);
         if (str_ieq(key, "version")) str_copy(version, val, ver_cap);
+        if (str_ieq(key, "entry")) str_copy(entry, val, entry_cap);
+        if (str_ieq(key, "description")) str_copy(description, val, desc_cap);
     }
     return false;
 }
@@ -1359,18 +1401,40 @@ bool nxapp_run(const char* path, const char* args, bool info_only) {
     }
 
     int code_start = 0;
+    char app_id[24];
     char name[48];
     char version[24];
-    if (!nxapp_parse_manifest(content, &code_start, name, sizeof(name), version, sizeof(version))) {
+    char entry[24];
+    char description[80];
+    if (!nxapp_parse_manifest_full(content,
+                                   &code_start,
+                                   app_id,
+                                   sizeof(app_id),
+                                   name,
+                                   sizeof(name),
+                                   version,
+                                   sizeof(version),
+                                   entry,
+                                   sizeof(entry),
+                                   description,
+                                   sizeof(description))) {
         print_line("nxapp: invalid format (need NXAPP-1 + ---)");
         return false;
     }
 
     if (info_only) {
+        print("id: ");
+        print_line(app_id[0] ? app_id : "(none)");
         print("name: ");
         print_line(name[0] ? name : "(unnamed)");
         print("version: ");
         print_line(version[0] ? version : "(none)");
+        print("entry: ");
+        print_line(entry[0] ? entry : "(main)");
+        if (description[0] != '\0') {
+            print("description: ");
+            print_line(description);
+        }
         int pos = code_start;
         char line[180];
         u32 count = 0;
@@ -1404,6 +1468,228 @@ bool nxapp_run(const char* path, const char* args, bool info_only) {
     return true;
 }
 
+void appmgr_clear() {
+    g_app_count = 0;
+    for (int i = 0; i < MAX_APPS; i++) {
+        g_apps[i].used = false;
+        g_apps[i].id[0] = '\0';
+        g_apps[i].name[0] = '\0';
+        g_apps[i].version[0] = '\0';
+        g_apps[i].path[0] = '\0';
+        g_apps[i].entry[0] = '\0';
+        g_apps[i].description[0] = '\0';
+    }
+}
+
+bool appmgr_id_valid(const char* id) {
+    int n = str_len(id);
+    if (n <= 0 || n >= (int)sizeof(g_apps[0].id)) return false;
+    for (int i = 0; i < n; i++) {
+        char c = id[i];
+        bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+void appmgr_derive_id_from_path(const char* path, char* out, int cap) {
+    int last = 0;
+    for (int i = 0; path[i] != '\0'; i++) if (path[i] == '/') last = i + 1;
+    int o = 0;
+    for (int i = last; path[i] != '\0' && o < cap - 1; i++) {
+        char c = to_lower(path[i]);
+        if (c == '.') break;
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') out[o++] = c;
+        else out[o++] = '-';
+    }
+    out[o] = '\0';
+}
+
+int appmgr_find(const char* id) {
+    for (int i = 0; i < g_app_count; i++) {
+        if (g_apps[i].used && str_ieq(g_apps[i].id, id)) return i;
+    }
+    return -1;
+}
+
+bool appmgr_add_or_update(const AppRecord* in) {
+    int idx = appmgr_find(in->id);
+    if (idx < 0) {
+        if (g_app_count >= MAX_APPS) return false;
+        idx = g_app_count++;
+    }
+    g_apps[idx] = *in;
+    g_apps[idx].used = true;
+    return true;
+}
+
+void appmgr_parse_db_line(const char* line, AppRecord* out) {
+    out->used = false;
+    int field = 0;
+    char* targets[6] = {out->id, out->name, out->version, out->path, out->entry, out->description};
+    int caps[6] = {(int)sizeof(out->id), (int)sizeof(out->name), (int)sizeof(out->version), (int)sizeof(out->path), (int)sizeof(out->entry), (int)sizeof(out->description)};
+    int pos[6] = {0, 0, 0, 0, 0, 0};
+
+    for (int i = 0; ; i++) {
+        char c = line[i];
+        if (c == '|' || c == '\0') {
+            if (field < 6) targets[field][pos[field]] = '\0';
+            field++;
+            if (c == '\0') break;
+            continue;
+        }
+        if (field < 6 && pos[field] < caps[field] - 1) targets[field][pos[field]++] = c;
+    }
+
+    if (out->id[0] == '\0' || out->path[0] == '\0') return;
+    if (out->entry[0] == '\0') str_copy(out->entry, "main", (int)sizeof(out->entry));
+    out->used = true;
+}
+
+bool appmgr_save_db() {
+    char text[4096];
+    int o = 0;
+    for (int i = 0; i < g_app_count; i++) {
+        if (!g_apps[i].used) continue;
+        const char* cols[6] = {g_apps[i].id, g_apps[i].name, g_apps[i].version, g_apps[i].path, g_apps[i].entry, g_apps[i].description};
+        for (int c = 0; c < 6; c++) {
+            for (int j = 0; cols[c][j] != '\0' && o < (int)sizeof(text) - 1; j++) text[o++] = cols[c][j];
+            if (c < 5 && o < (int)sizeof(text) - 1) text[o++] = '|';
+        }
+        if (o < (int)sizeof(text) - 1) text[o++] = '\n';
+    }
+    text[o] = '\0';
+    if (!fs_write_text("/system/appdb/installed.db", text)) return false;
+    return fs_sync_to_disk();
+}
+
+void appmgr_load_db() {
+    appmgr_clear();
+    char text[4096];
+    if (!fs_read_text_file("/system/appdb/installed.db", text, (int)sizeof(text))) return;
+
+    int pos = 0;
+    char line[220];
+    while (nxapp_next_line(text, &pos, line, sizeof(line))) {
+        nxapp_trim(line);
+        if (line[0] == '\0' || line[0] == '#') continue;
+        AppRecord rec{};
+        appmgr_parse_db_line(line, &rec);
+        if (!rec.used) continue;
+        if (g_app_count < MAX_APPS) g_apps[g_app_count++] = rec;
+    }
+}
+
+bool appmgr_manifest_from_path(const char* path, AppRecord* out) {
+    char content[1024];
+    if (!fs_read_text_file(path, content, (int)sizeof(content))) return false;
+
+    int code_start = 0;
+    char app_id[24];
+    char name[48];
+    char version[16];
+    char entry[24];
+    char description[80];
+    if (!nxapp_parse_manifest_full(content,
+                                   &code_start,
+                                   app_id,
+                                   sizeof(app_id),
+                                   name,
+                                   sizeof(name),
+                                   version,
+                                   sizeof(version),
+                                   entry,
+                                   sizeof(entry),
+                                   description,
+                                   sizeof(description))) return false;
+
+    if (app_id[0] == '\0') appmgr_derive_id_from_path(path, app_id, (int)sizeof(app_id));
+    if (!appmgr_id_valid(app_id)) return false;
+
+    out->used = true;
+    str_copy(out->id, app_id, (int)sizeof(out->id));
+    str_copy(out->name, name[0] ? name : app_id, (int)sizeof(out->name));
+    str_copy(out->version, version[0] ? version : "0.0", (int)sizeof(out->version));
+    str_copy(out->path, path, (int)sizeof(out->path));
+    str_copy(out->entry, entry[0] ? entry : "main", (int)sizeof(out->entry));
+    str_copy(out->description, description, (int)sizeof(out->description));
+    return true;
+}
+
+bool appmgr_install(const char* path) {
+    AppRecord rec{};
+    if (!appmgr_manifest_from_path(path, &rec)) return false;
+    if (!appmgr_add_or_update(&rec)) return false;
+    return appmgr_save_db();
+}
+
+bool appmgr_remove(const char* id) {
+    int idx = appmgr_find(id);
+    if (idx < 0) return false;
+    for (int i = idx + 1; i < g_app_count; i++) g_apps[i - 1] = g_apps[i];
+    g_app_count--;
+    return appmgr_save_db();
+}
+
+bool appmgr_run(const char* id, const char* args) {
+    int idx = appmgr_find(id);
+    if (idx < 0) return false;
+    return nxapp_run(g_apps[idx].path, args, false);
+}
+
+bool appmgr_info(const char* id) {
+    int idx = appmgr_find(id);
+    if (idx < 0) return false;
+    AppRecord* a = &g_apps[idx];
+    print("id: "); print_line(a->id);
+    print("name: "); print_line(a->name);
+    print("version: "); print_line(a->version);
+    print("path: "); print_line(a->path);
+    print("entry: "); print_line(a->entry);
+    if (a->description[0] != '\0') {
+        print("description: ");
+        print_line(a->description);
+    }
+    return true;
+}
+
+void appmgr_list() {
+    if (g_app_count == 0) {
+        print_line("apps: none installed");
+        return;
+    }
+    for (int i = 0; i < g_app_count; i++) {
+        print(g_apps[i].id);
+        print("  ");
+        print(g_apps[i].version);
+        print("  ");
+        print_line(g_apps[i].name);
+    }
+}
+
+u32 appmgr_rescan(const char* dir_path) {
+    u8 dir;
+    if (!fs_resolve_dir(dir_path, &dir)) return 0;
+    NxfsHeader* h = fs_header();
+    NxfsEntry* entries = fs_entries();
+    u32 installed = 0;
+    for (u32 i = 0; i < h->max_entries; i++) {
+        if (!entries[i].used) continue;
+        if (fs_parent(&entries[i]) != dir) continue;
+        if (!fs_is_file(&entries[i])) continue;
+        if (!str_ends_with(entries[i].name, ".nxapp")) continue;
+
+        char path[96];
+        str_copy(path, dir_path, (int)sizeof(path));
+        int p = str_len(path);
+        if (p > 0 && path[p - 1] != '/' && p < (int)sizeof(path) - 1) path[p++] = '/';
+        for (int j = 0; entries[i].name[j] != '\0' && p < (int)sizeof(path) - 1; j++) path[p++] = entries[i].name[j];
+        path[p] = '\0';
+        if (appmgr_install(path)) installed++;
+    }
+    return installed;
+}
+
 void reboot_system() {
     while (inb(0x64) & 0x02) {
     }
@@ -1435,6 +1721,13 @@ void show_help() {
     print_line("chown <uid> <path>       Change owner (root only)");
     print_line("modules                  List loaded modules");
     print_line("modreload                Reload modules from /system/modules");
+    print_line("app list                 List installed apps");
+    print_line("app info <id>            Show app metadata");
+    print_line("app install <path>       Install/update .nxapp");
+    print_line("app remove <id>          Uninstall app");
+    print_line("app run <id> [args]      Run installed app");
+    print_line("app rescan [dir]         Bulk install .nxapp from dir");
+    print_line("<app-id> [args]          Run installed app directly");
     print_line("nxinfo <path>            Show .nxapp metadata");
     print_line("nxrun <path> [args]      Run .nxapp program");
     print_line("df                       Filesystem usage");
@@ -1561,6 +1854,67 @@ void execute_command(const char* line) {
         print("modreload: loaded ");
         print_u32((u32)g_module_count);
         print_line(" modules");
+        return;
+    }
+    if (str_ieq(cmd, "app")) {
+        char sub[16];
+        if (!next_token(s, sub, sizeof(sub))) {
+            print_line("app: usage app <list|info|install|remove|run|rescan> ...");
+            return;
+        }
+        if (str_ieq(sub, "list")) {
+            appmgr_list();
+            return;
+        }
+        if (str_ieq(sub, "info")) {
+            char id[24];
+            if (!next_token(s, id, sizeof(id))) {
+                print_line("app info: usage app info <id>");
+                return;
+            }
+            if (!appmgr_info(id)) print_line("app info: not found");
+            return;
+        }
+        if (str_ieq(sub, "install")) {
+            char path[96];
+            if (!next_token(s, path, sizeof(path))) {
+                print_line("app install: usage app install <path>");
+                return;
+            }
+            if (!appmgr_install(path)) print_line("app install: failed");
+            else print_line("app install: ok");
+            return;
+        }
+        if (str_ieq(sub, "remove")) {
+            char id[24];
+            if (!next_token(s, id, sizeof(id))) {
+                print_line("app remove: usage app remove <id>");
+                return;
+            }
+            if (!appmgr_remove(id)) print_line("app remove: not found/failed");
+            else print_line("app remove: ok");
+            return;
+        }
+        if (str_ieq(sub, "run")) {
+            char id[24];
+            if (!next_token(s, id, sizeof(id))) {
+                print_line("app run: usage app run <id> [args]");
+                return;
+            }
+            if (!appmgr_run(id, skip_spaces(s))) print_line("app run: failed");
+            return;
+        }
+        if (str_ieq(sub, "rescan")) {
+            char dir[64];
+            const char* dir_path = "/system/apps";
+            if (next_token(s, dir, sizeof(dir))) dir_path = dir;
+            u32 count = appmgr_rescan(dir_path);
+            print("app rescan: installed ");
+            print_u32(count);
+            print_line(" app(s)");
+            return;
+        }
+        print_line("app: unknown subcommand");
         return;
     }
     if (str_ieq(cmd, "nxinfo")) {
@@ -1703,6 +2057,7 @@ void execute_command(const char* line) {
     }
 
     if (modules_execute(cmd, skip_spaces(s))) return;
+    if (appmgr_run(cmd, skip_spaces(s))) return;
 
     print(cmd);
     print_line(": command not found");
@@ -1757,6 +2112,10 @@ extern "C" void kmain() {
 
     fs_mount();
     modules_load();
+    appmgr_load_db();
+    if (g_app_count == 0) {
+        appmgr_rescan("/system/apps");
+    }
 
     char line[MAX_LINE];
     char prompt[96];
@@ -1767,3 +2126,4 @@ extern "C" void kmain() {
         execute_command(line);
     }
 }
+

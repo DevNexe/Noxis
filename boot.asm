@@ -34,10 +34,11 @@ boot_drive: db 0
 disk_address_packet:
     db 0x10
     db 0x00
-    dw 64              ; stage2 sectors from LBA 1
+    dw 96              ; stage2 sectors from LBA 1
     dw 0x8000          ; offset
     dw 0x0000          ; segment
     dq 1               ; LBA start
 
 times 510 - ($ - $$) db 0
 dw 0xAA55
+
